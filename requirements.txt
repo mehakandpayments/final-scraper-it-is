@@ -1,0 +1,17 @@
+# --- Web UI ---
+streamlit>=1.40
+
+# --- Fetching ---
+httpx>=0.27            # fast static HTTP fetching (HTTP/2 capable)
+playwright>=1.49       # headless-browser fallback for JS-rendered pages
+
+# --- Parsing / link extraction ---
+beautifulsoup4>=4.12
+lxml>=5.0
+
+# --- HTML -> Markdown ---
+docling>=2.0           # primary HTML -> Markdown converter (pulls torch et al.)
+
+# --- Helpers ---
+tldextract>=5.1        # robust domain extraction for categorisation/grouping
+pandas>=2.2            # tabular display + CSV export of links
