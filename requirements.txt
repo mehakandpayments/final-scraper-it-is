@@ -15,3 +15,6 @@ docling>=2.0           # primary HTML -> Markdown converter (pulls torch et al.)
 # --- Helpers ---
 tldextract>=5.1        # robust domain extraction for categorisation/grouping
 pandas>=2.2            # tabular display + CSV export of links
+
+# --- Storage (optional persistent backend) ---
+pymongo>=4.6           # store each scraped page as a document in MongoDB

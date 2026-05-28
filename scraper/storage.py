@@ -1,14 +1,18 @@
 """Persist results to the local ``storage/`` folder.
 
-For each page:
+Each scraped URL gets its own self-contained folder:
 
-    storage/<host>/<slug>.md          # clean Markdown + YAML front-matter
-    storage/<host>/<slug>.links.json  # full link inventory with categories
-    storage/<host>/<slug>.links.csv   # same, spreadsheet-friendly
+    storage/<host>/<slug>/
+        page.md        # clean Markdown + YAML front-matter
+        links.json     # full link inventory with categories
+        links.csv      # same, spreadsheet-friendly
+        meta.json      # every other field (status, timestamps, signals, ...)
 
-and one appended line per page in ``storage/manifest.jsonl`` (a run-wide index).
-File stems embed a short URL hash, so distinct URLs never clobber each other and
-re-scraping a URL deterministically overwrites its own files.
+plus one appended line per page in ``storage/manifest.jsonl`` (a run-wide index).
+The slug is a deterministic path-derived stem + short URL hash, so distinct URLs
+never clobber each other and **re-scraping the same URL refreshes its own folder
+in place** (no half-stale files). Different URLs sit in different folders, so the
+overall ``storage/`` accumulates across runs.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from pathlib import Path
 
 from .config import ScrapeConfig
 from .models import PageResult
-from .utils import hostname, path_slug
+from .utils import hostname, path_slug, registered_domain
 
 _LINK_CSV_FIELDS = ["url", "text", "category", "region", "section", "is_internal", "is_nofollow", "rel"]
 
@@ -92,29 +96,54 @@ class Storage:
         self._manifest_lock = threading.Lock()
         self._manifest_path = self.root / "manifest.jsonl"
 
-    def _page_dir(self, url: str) -> Path:
+    def _page_folder(self, url: str) -> Path:
+        """``storage/<host>/<slug>/`` — one folder per URL, created on demand."""
         host = hostname(url) or "unknown-host"
-        d = self.root / host
-        d.mkdir(parents=True, exist_ok=True)
-        return d
+        slug = path_slug(url)
+        folder = self.root / host / slug
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def _meta(self, result: PageResult) -> dict:
+        """All scalar metadata for the page (everything except markdown + links)."""
+        ref = result.final_url or result.url
+        return {
+            "url": result.url,
+            "final_url": result.final_url,
+            "title": result.title,
+            "host": hostname(ref),
+            "domain": registered_domain(ref),
+            "fetched_at": result.fetched_at,
+            "status_code": result.status_code,
+            "rendered": result.rendered,
+            "depth": result.depth,
+            "elapsed_ms": result.elapsed_ms,
+            "num_links": result.num_links,
+            "num_pdf_links": sum(1 for lk in result.links if getattr(lk, "is_pdf", False)),
+            "error": result.error,
+            "blocked_reason": result.blocked_reason,
+            "signals": list(result.signals),
+            "pdf_files": [p.to_dict() for p in result.pdf_files],
+            "changes": result.changes.to_dict() if result.changes is not None else None,
+        }
 
     def save(self, result: PageResult) -> PageResult:
-        """Write all artefacts for ``result`` and record the paths on it."""
-        page_dir = self._page_dir(result.final_url or result.url)
-        stem = path_slug(result.final_url or result.url)
+        """Write all artefacts for ``result`` into its own per-URL folder."""
+        folder = self._page_folder(result.final_url or result.url)
+        result.folder = str(folder)
 
-        md_path = page_dir / f"{stem}.md"
+        # page.md  — docling already emits the page's own headings, so we don't
+        # re-add the title (it's in the front-matter); guard an empty body.
+        md_path = folder / "page.md"
         body = result.markdown or ""
         if result.error and not body:
             body = f"> Scrape note: {result.error}\n"
-        # docling already emits the page's own headings, so we don't re-add the
-        # title here (it lives in the front-matter); just guard an empty body.
         md_path.write_text(_front_matter(result) + body, encoding="utf-8")
         result.markdown_path = str(md_path)
 
-        # Link inventory (JSON + CSV).
-        links_json = page_dir / f"{stem}.links.json"
+        # links.json — full inventory with category/region/is_pdf etc.
         link_dicts = [lr.to_dict() for lr in result.links]
+        links_json = folder / "links.json"
         links_json.write_text(
             json.dumps(
                 {"source_url": result.url, "final_url": result.final_url,
@@ -125,12 +154,18 @@ class Storage:
         )
         result.links_path = str(links_json)
 
-        links_csv = page_dir / f"{stem}.links.csv"
+        # links.csv — same data, spreadsheet-friendly.
+        links_csv = folder / "links.csv"
         with links_csv.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=_LINK_CSV_FIELDS, extrasaction="ignore")
             writer.writeheader()
             for d in link_dicts:
                 writer.writerow(d)
+
+        # meta.json — everything else, as a clean JSON.
+        (folder / "meta.json").write_text(
+            json.dumps(self._meta(result), indent=2, ensure_ascii=False), encoding="utf-8",
+        )
 
         self._append_manifest(result)
         return result

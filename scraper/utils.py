@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
+import urllib.request
 import urllib.robotparser
 from urllib.parse import urljoin, urldefrag, urlparse, urlunparse
 
@@ -90,11 +91,16 @@ class RobotsGate:
                 return self._cache[host_key]
         parser: urllib.robotparser.RobotFileParser | None
         try:
+            # Fetch with an explicit timeout — RobotFileParser.read() uses urlopen
+            # with *no* timeout, which can hang a worker on a slow/unresponsive host.
             parser = urllib.robotparser.RobotFileParser()
-            parser.set_url(urljoin(host_key, "/robots.txt"))
-            parser.read()  # uses urllib; short and infrequent
+            robots_url = urljoin(host_key, "/robots.txt")
+            req = urllib.request.Request(robots_url, headers={"User-Agent": self.user_agent})
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+            parser.parse(raw.splitlines())
         except Exception:
-            parser = None
+            parser = None  # unreachable/missing robots -> fail-open (allow)
         with self._lock:
             self._cache[host_key] = parser
         return parser

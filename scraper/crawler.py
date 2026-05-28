@@ -17,7 +17,7 @@ import threading
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Callable, Iterator
 
-from .config import ScrapeConfig, ScrapeMode
+from .config import RenderMode, ScrapeConfig, ScrapeMode
 from .converter import html_to_markdown
 from .fetcher import Fetcher
 from .links import extract_links_and_title
@@ -27,10 +27,11 @@ from .utils import RobotsGate, hostname, is_http_url, normalize_url, registered_
 
 
 class Crawler:
-    def __init__(self, config: ScrapeConfig) -> None:
+    def __init__(self, config: ScrapeConfig, mongo_store=None) -> None:
         self.cfg = config
         self.fetcher = Fetcher(config)
         self.storage = Storage(config)
+        self.mongo = mongo_store  # optional MongoStore; None disables DB writes
         self.robots = RobotsGate(config.user_agent) if config.respect_robots else None
         self.stop_event = threading.Event()
         # Crawl scope, filled in by run() from the seed URLs.
@@ -43,26 +44,68 @@ class Crawler:
         result = PageResult(url=url, final_url=url, depth=depth)
         if self.robots is not None and not self.robots.allowed(url):
             result.error = "blocked by robots.txt"
-            return self.storage.save(result)
+        else:
+            fetch = self.fetcher.fetch(url)
+            result.final_url = fetch.final_url or url
+            result.status_code = fetch.status_code
+            result.rendered = fetch.rendered
+            result.elapsed_ms = fetch.elapsed_ms
+            result.blocked_reason = fetch.blocked_reason
+            result.signals = list(fetch.signals)
+            if not fetch.ok:
+                result.error = fetch.error or "fetch failed"
+            else:
+                markdown, md_err = html_to_markdown(fetch)
+                links, title = extract_links_and_title(fetch.html, result.final_url)
 
-        fetch = self.fetcher.fetch(url)
-        result.final_url = fetch.final_url or url
-        result.status_code = fetch.status_code
-        result.rendered = fetch.rendered
-        result.elapsed_ms = fetch.elapsed_ms
+                # Content-aware JS escalation: in AUTO mode a *static* fetch may
+                # return HTTP 200 yet yield almost no content because the page
+                # builds itself with JavaScript (the static text heuristic can
+                # miss this when there's server-rendered nav/sidebar). If a
+                # sizable page produced near-empty Markdown, render it for real
+                # and keep whichever result has more content.
+                if (self.cfg.render_mode is RenderMode.AUTO and not fetch.rendered
+                        and len(markdown.strip()) < 200 and len(fetch.html) > 2000):
+                    rfetch = self.fetcher.fetch_browser(url)
+                    if rfetch.ok:
+                        rmd, rmd_err = html_to_markdown(rfetch)
+                        rlinks, rtitle = extract_links_and_title(rfetch.html, rfetch.final_url)
+                        if len(rmd.strip()) > len(markdown.strip()):
+                            fetch, markdown, md_err, links, title = rfetch, rmd, rmd_err, rlinks, rtitle
+                            result.final_url = rfetch.final_url or url
+                            result.status_code = rfetch.status_code
+                            result.rendered = True
+                            result.elapsed_ms += rfetch.elapsed_ms
+                            result.blocked_reason = rfetch.blocked_reason
+                            result.signals = list(rfetch.signals)
 
-        if not fetch.ok:
-            result.error = fetch.error or "fetch failed"
-            return self.storage.save(result)
+                result.markdown = markdown
+                result.title = title
+                result.links = links
+                if md_err:
+                    result.error = md_err  # soft: links may still be present
 
-        markdown, md_err = html_to_markdown(fetch)
-        links, title = extract_links_and_title(fetch.html, result.final_url)
-        result.markdown = markdown
-        result.title = title
-        result.links = links
-        if md_err:
-            result.error = md_err  # soft: links may still be present
-        return self.storage.save(result)
+                # PDF change tracking: download + hash every direct .pdf link.
+                if self.cfg.monitor_pdfs and result.links:
+                    pdf_urls = sorted({lk.url for lk in result.links if lk.is_pdf})
+                    if pdf_urls:
+                        import time as _time
+                        t0 = _time.monotonic()
+                        result.pdf_files = [self.fetcher.download_pdf(u) for u in pdf_urls]
+                        result.elapsed_ms += int((_time.monotonic() - t0) * 1000)
+
+        self.storage.save(result)
+        self._save_mongo(result)
+        return result
+
+    def _save_mongo(self, result: PageResult) -> None:
+        if self.mongo is None:
+            return
+        try:
+            self.mongo.save(result)
+            result.mongo_saved = True
+        except Exception as exc:  # DB hiccup must not abort the scrape
+            result.mongo_error = f"{type(exc).__name__}: {exc}"
 
     # -- in-scope link filtering ---------------------------------------------
 
@@ -91,7 +134,13 @@ class Crawler:
         seeds: list[str] = []
         seen_seed: set[str] = set()
         for raw in seed_urls:
-            u = normalize_url(raw.strip()) if raw.strip() else ""
+            raw = raw.strip()
+            if not raw:
+                continue
+            # Accept bare domains ("example.com") by assuming https://.
+            if "://" not in raw and not raw.startswith("//"):
+                raw = "https://" + raw
+            u = normalize_url(raw)
             if u and is_http_url(u) and u not in seen_seed:
                 seeds.append(u)
                 seen_seed.add(u)

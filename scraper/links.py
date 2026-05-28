@@ -14,7 +14,7 @@ which is exactly the kind of grouping a human would read off the page.
 from __future__ import annotations
 
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -74,6 +74,11 @@ _HINT_REGION = [
 
 def _clean(text: str, limit: int = 300) -> str:
     return _WS_RE.sub(" ", (text or "").strip())[:limit]
+
+
+def _is_pdf(url: str) -> bool:
+    """True for links that point directly at a PDF file (by path extension)."""
+    return urlparse(url).path.lower().endswith(".pdf")
 
 
 def _region_for(anchor) -> str:
@@ -173,6 +178,7 @@ def extract_links_and_title(html: str, base_url: str) -> tuple[list[LinkRecord],
                 rel=rel,
                 is_internal=registered_domain(abs_url) == page_domain,
                 is_nofollow="nofollow" in rel.lower(),
+                is_pdf=_is_pdf(abs_url),
             )
         )
 

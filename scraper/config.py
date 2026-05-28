@@ -51,6 +51,16 @@ class ScrapeConfig:
     respect_robots: bool = True
     max_retries: int = 2
 
+    # --- anti-blocking (for public pages behind bot detection) ---
+    stealth: bool = True                   # reduce trivial automation fingerprints in the browser
+    proxy: str | None = None               # e.g. "http://user:pass@host:port" (your own proxy)
+    challenge_max_wait: float = 12.0       # seconds to let a JS (e.g. Cloudflare) challenge clear
+    max_retry_after: float = 30.0          # cap on honouring a 429 Retry-After header
+
+    # --- change monitoring ---
+    monitor_pdfs: bool = True              # download each PDF link and hash it to detect changes
+    pdf_max_bytes: int = 50 * 1024 * 1024  # skip any single PDF larger than this
+
     # --- crawl scope (ScrapeMode.CRAWL only) ---
     mode: ScrapeMode = ScrapeMode.SINGLE
     max_depth: int = 1                     # 0 = seeds only; 1 = seeds + their links; ...
@@ -71,3 +81,4 @@ class ScrapeConfig:
         self.concurrency = max(1, int(self.concurrency))
         self.max_pages = max(1, int(self.max_pages))
         self.max_depth = max(0, int(self.max_depth))
+        self.proxy = self.proxy or None  # normalise "" -> None
